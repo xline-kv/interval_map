@@ -1,0 +1,23 @@
+[package]
+name = "interval_map"
+version = "0.1.0"
+edition = "2021"
+authors = ["feathercyc feathercyc@163.com"]
+description = "`interval_map` is a map based on interval tree."
+license = "Apache-2.0"
+keywords = ["Interval Tree", "Augmented Tree", "Red-Black Tree"]
+
+[dependencies]
+
+[dev-dependencies]
+criterion = "0.5.1"
+rand = "0.8.5"
+
+[features]
+default = []
+interval_tree_find_overlap_ordered = []
+
+[[bench]]
+name = "bench"
+path = "benches/bench.rs"
+harness = false
