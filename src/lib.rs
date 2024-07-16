@@ -25,8 +25,13 @@ mod entry;
 mod index;
 mod interval;
 mod intervalmap;
+mod iter;
 mod node;
+
+#[cfg(test)]
+mod tests;
 
 pub use entry::{Entry, OccupiedEntry, VacantEntry};
 pub use interval::Interval;
-pub use intervalmap::{IntervalMap, Iter};
+pub use intervalmap::IntervalMap;
+pub use iter::Iter;

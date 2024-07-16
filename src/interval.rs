@@ -8,9 +8,14 @@
 //!
 //! Currently, `interval_map` only supports half-open intervals, i.e., [...,...).
 
+use std::fmt::{Display, Formatter};
+
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 /// The interval stored in `IntervalMap` represents [low, high)
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Interval<T> {
     /// Low value
     pub low: T,
@@ -34,6 +39,24 @@ impl<T: Ord> Interval<T> {
     #[inline]
     pub fn overlap(&self, other: &Self) -> bool {
         self.high > other.low && other.high > self.low
+    }
+
+    /// Checks if self contains other interval
+    /// e.g. [1,10) contains [1,8)
+    #[inline]
+    pub fn contain(&self, other: &Self) -> bool {
+        self.low <= other.low && self.high > other.high
+    }
+
+    /// Checks if self contains a point
+    pub fn contain_point(&self, p: T) -> bool {
+        self.low <= p && self.high > p
+    }
+}
+
+impl<T: Display> Display for Interval<T> {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "[{},{})", self.low, self.high)
     }
 }
 
@@ -64,6 +87,21 @@ impl<'a, T: Ord> IntervalRef<'a, T> {
     }
 }
 
+#[cfg(feature = "serde")]
+impl<T: Serialize + Ord> Serialize for Interval<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (&self.low, &self.high).serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, T: Deserialize<'de> + Ord> Deserialize<'de> for Interval<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (low, high) = <(T, T)>::deserialize(deserializer)?;
+        Ok(Interval::new(low, high))
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -72,5 +110,43 @@ mod test {
     #[should_panic(expected = "invalid range")]
     fn invalid_range_should_panic() {
         let _interval = Interval::new(3, 1);
+    }
+
+    #[test]
+    fn test_interval_clone() {
+        let interval1 = Interval::new(1, 10);
+        let interval2 = interval1.clone();
+        assert_eq!(interval1, interval2);
+    }
+
+    #[test]
+    fn test_interval_compare() {
+        let interval1 = Interval::new(1, 10);
+        let interval2 = Interval::new(5, 15);
+        assert!(interval1 < interval2);
+        assert!(interval2 > interval1);
+        assert_eq!(interval1, Interval::new(1, 10));
+        assert_ne!(interval1, interval2);
+    }
+
+    #[test]
+    fn test_interval_hash() {
+        let interval1 = Interval::new(1, 10);
+        let interval2 = Interval::new(1, 10);
+        let interval3 = Interval::new(5, 15);
+        let mut hashset = std::collections::HashSet::new();
+        hashset.insert(interval1);
+        hashset.insert(interval2);
+        hashset.insert(interval3);
+        assert_eq!(hashset.len(), 2);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_interval_serialize_deserialize() {
+        let interval = Interval::new(1, 10);
+        let serialized = serde_json::to_string(&interval).unwrap();
+        let deserialized: Interval<i32> = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(interval, deserialized);
     }
 }

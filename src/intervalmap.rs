@@ -1,12 +1,29 @@
 use crate::entry::{Entry, OccupiedEntry, VacantEntry};
-use crate::index::{DefaultIx, IndexType, NodeIndex};
+use crate::index::{self, DefaultIx, IndexType, NodeIndex};
 use crate::interval::{Interval, IntervalRef};
+use crate::iter::{FilterIter, IntoIter, Iter, UnsortedIter};
 use crate::node::{Color, Node};
+
 use std::collections::VecDeque;
+use std::fmt::Debug;
+
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "graphviz")]
+use std::fmt::Display;
+#[cfg(feature = "graphviz")]
+use std::fs::OpenOptions;
+#[cfg(feature = "graphviz")]
+use std::io::Write;
 
 /// An interval-value map, which support operations on dynamic sets of intervals.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug)]
-pub struct IntervalMap<T, V, Ix = DefaultIx> {
+pub struct IntervalMap<T, V, Ix = DefaultIx>
+where
+    T: Ord,
+{
     /// Vector that stores nodes
     pub(crate) nodes: Vec<Node<T, V, Ix>>,
     /// Root of the interval tree
@@ -24,16 +41,16 @@ where
     #[inline]
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
-        let mut nodes = vec![Self::new_sentinel()];
+        let mut nodes = vec![Node::new_sentinel()];
         nodes.reserve(capacity);
         IntervalMap {
             nodes,
-            root: Self::sentinel(),
+            root: NodeIndex::SENTINEL,
             len: 0,
         }
     }
 
-    /// Insert an interval-value pair into the map.
+    /// insert an interval-value pair into the map.
     /// If the interval exists, overwrite and return the previous value.
     ///
     /// # Panics
@@ -52,10 +69,11 @@ where
     #[inline]
     pub fn insert(&mut self, interval: Interval<T>, value: V) -> Option<V> {
         let node_idx = NodeIndex::new(self.nodes.len());
-        let node = Self::new_node(interval, value, node_idx);
+        let node = Node::new(interval, value, node_idx);
         // check for max capacity, except if we use usize
         assert!(
-            <Ix as IndexType>::max().index() == !0 || NodeIndex::end() != node_idx,
+            <Ix as IndexType>::max().index() == !0
+                || <index::NodeIndex<_> as index::IndexType>::max() != node_idx,
             "Reached maximum number of nodes"
         );
         self.nodes.push(node);
@@ -101,18 +119,21 @@ where
     /// map.insert(Interval::new(1, 3), ());
     /// map.insert(Interval::new(6, 7), ());
     /// map.insert(Interval::new(9, 11), ());
-    /// assert!(map.overlap(&Interval::new(2, 5)));
-    /// assert!(map.overlap(&Interval::new(1, 17)));
-    /// assert!(!map.overlap(&Interval::new(3, 6)));
-    /// assert!(!map.overlap(&Interval::new(11, 23)));
+    /// assert!(map.overlaps(&Interval::new(2, 5)));
+    /// assert!(map.overlaps(&Interval::new(1, 17)));
+    /// assert!(!map.overlaps(&Interval::new(3, 6)));
+    /// assert!(!map.overlaps(&Interval::new(11, 23)));
     /// ```
     #[inline]
-    pub fn overlap(&self, interval: &Interval<T>) -> bool {
+    pub fn overlaps(&self, interval: &Interval<T>) -> bool {
         let node_idx = self.search(interval);
         !self.node_ref(node_idx, Node::is_sentinel)
     }
 
     /// Find all intervals in the map that overlaps with the given interval.
+    ///
+    /// # Note
+    /// This method's returned data is unordered. To get ordered data, please use `find_all_overlap_ordered`.
     ///
     /// # Example
     /// ```rust
@@ -130,9 +151,44 @@ where
     #[inline]
     pub fn find_all_overlap(&self, interval: &Interval<T>) -> Vec<(&Interval<T>, &V)> {
         if self.node_ref(self.root, Node::is_sentinel) {
+            return Vec::new();
+        }
+        if self.len() > 20 {
+            self.find_all_overlap_inner(self.root, interval)
+        } else {
+            self.unsorted_iter()
+                .filter(|v| v.0.overlap(interval))
+                .collect()
+        }
+    }
+
+    /// Find all intervals in the map that overlaps with the given interval.
+    ///
+    /// # Note
+    /// This method's returned data is ordered. Generally, it's much slower than `find_all_overlap`.
+    ///
+    /// # Example
+    /// ```rust
+    /// use interval_map::{Interval, IntervalMap};
+    ///
+    /// let mut map = IntervalMap::new();
+    /// map.insert(Interval::new(1, 3), ());
+    /// map.insert(Interval::new(2, 4), ());
+    /// map.insert(Interval::new(6, 7), ());
+    /// map.insert(Interval::new(7, 11), ());
+    /// assert_eq!(map.find_all_overlap(&Interval::new(2, 7)).len(), 3);
+    /// map.remove(&Interval::new(1, 3));
+    /// assert_eq!(map.find_all_overlap(&Interval::new(2, 7)).len(), 2);
+    /// ```
+    #[inline]
+    pub fn find_all_overlap_ordered<'a>(
+        &'a self,
+        interval: &'a Interval<T>,
+    ) -> Vec<(&Interval<T>, &V)> {
+        if self.node_ref(self.root, Node::is_sentinel) {
             Vec::new()
         } else {
-            self.find_all_overlap_inner_unordered(self.root, interval)
+            self.filter_iter(interval).collect()
         }
     }
 
@@ -176,10 +232,71 @@ where
     #[inline]
     #[must_use]
     pub fn iter(&self) -> Iter<'_, T, V, Ix> {
-        Iter {
-            map_ref: self,
-            stack: None,
-        }
+        Iter::new(self)
+    }
+
+    /// Get an into iterator over the entries of the map, sorted by key.
+    // #[inline]
+    // #[must_use]
+    // pub fn into_iter(self) -> IntoIter<T, V, Ix> {
+    //     IntoIter::new(self)
+    // }
+
+    /// Get an iterator over the entries of the map, unsorted.
+    #[inline]
+    pub fn unsorted_iter(&self) -> UnsortedIter<T, V, Ix> {
+        UnsortedIter::new(self)
+    }
+
+    /// Get an iterator over the entries that overlap the `query`, sorted by key.
+    ///
+    /// # Panics
+    ///
+    /// The method panics when `query` contains a value that cannot be compared.
+    #[inline]
+    pub fn filter_iter<'a, 'b: 'a>(&'a self, query: &'b Interval<T>) -> FilterIter<T, V, Ix> {
+        FilterIter::new(self, query)
+    }
+
+    /// Return true if the interval tree's key cover the entire given interval.
+    ///
+    /// # Example
+    /// ```rust
+    /// use interval_map::{Interval, IntervalMap};
+    ///
+    /// let mut map = IntervalMap::new();
+    /// map.insert(Interval::new(3, 5), 0);
+    /// map.insert(Interval::new(5, 8), 1);
+    /// map.insert(Interval::new(9, 12), 1);
+    /// assert!(map.contains(&Interval::new(4, 6)));
+    /// assert!(!map.contains(&Interval::new(7, 10)));
+    /// ```
+    #[inline]
+    pub fn contains(&self, interval: &Interval<T>) -> bool {
+        let mut max_end: Option<&T> = None;
+        let mut min_begin: Option<&T> = None;
+
+        let mut continuous = true;
+        self.filter_iter(interval).find(|v| {
+            if min_begin.is_none() {
+                min_begin = Some(&v.0.low);
+                max_end = Some(&v.0.high);
+                return false;
+            }
+            if max_end.map(|mv| mv < &v.0.low).unwrap() {
+                continuous = false;
+                return true;
+            }
+            if max_end.map(|mv| mv < &v.0.high).unwrap() {
+                max_end = Some(&v.0.high);
+            }
+            false
+        });
+
+        continuous
+            && min_begin.is_some()
+            && max_end.map(|mv| mv >= &interval.high).unwrap()
+            && min_begin.map(|mv| mv <= &interval.low).unwrap()
     }
 
     /// Get the given key's corresponding entry in the map for in-place manipulation.
@@ -199,9 +316,9 @@ where
     #[inline]
     pub fn entry(&mut self, interval: Interval<T>) -> Entry<'_, T, V, Ix> {
         match self.search_exact(&interval) {
-            Some(node) => Entry::Occupied(OccupiedEntry {
+            Some(node_idx) => Entry::Occupied(OccupiedEntry {
                 map_ref: self,
-                node,
+                node_idx,
             }),
             None => Entry::Vacant(VacantEntry {
                 map_ref: self,
@@ -214,8 +331,8 @@ where
     #[inline]
     pub fn clear(&mut self) {
         self.nodes.clear();
-        self.nodes.push(Self::new_sentinel());
-        self.root = Self::sentinel();
+        self.nodes.push(Node::new_sentinel());
+        self.root = NodeIndex::SENTINEL;
         self.len = 0;
     }
 
@@ -234,6 +351,20 @@ where
     }
 }
 
+impl<T, V, Ix> IntoIterator for IntervalMap<T, V, Ix>
+where
+    T: Ord,
+    Ix: IndexType,
+{
+    type Item = (Interval<T>, V);
+
+    type IntoIter = IntoIter<T, V, Ix>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter::new(self)
+    }
+}
+
 impl<T, V> IntervalMap<T, V>
 where
     T: Ord,
@@ -242,11 +373,7 @@ where
     #[inline]
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            nodes: vec![Self::new_sentinel()],
-            root: Self::sentinel(),
-            len: 0,
-        }
+        Self::with_capacity(0)
     }
 }
 
@@ -265,46 +392,9 @@ where
     T: Ord,
     Ix: IndexType,
 {
-    /// Create a new sentinel node
-    fn new_sentinel() -> Node<T, V, Ix> {
-        Node {
-            interval: None,
-            value: None,
-            max_index: None,
-            left: None,
-            right: None,
-            parent: None,
-            color: Color::Black,
-        }
-    }
-
-    /// Create a new tree node
-    fn new_node(interval: Interval<T>, value: V, index: NodeIndex<Ix>) -> Node<T, V, Ix> {
-        Node {
-            max_index: Some(index),
-            interval: Some(interval),
-            value: Some(value),
-            left: Some(Self::sentinel()),
-            right: Some(Self::sentinel()),
-            parent: Some(Self::sentinel()),
-            color: Color::Red,
-        }
-    }
-
-    /// Get the sentinel node index
-    fn sentinel() -> NodeIndex<Ix> {
-        NodeIndex::new(0)
-    }
-}
-
-impl<T, V, Ix> IntervalMap<T, V, Ix>
-where
-    T: Ord,
-    Ix: IndexType,
-{
-    /// Insert a node into the tree.
+    /// insert a node into the tree.
     fn insert_inner(&mut self, z: NodeIndex<Ix>) -> Option<V> {
-        let mut y = Self::sentinel();
+        let mut y = NodeIndex::SENTINEL;
         let mut x = self.root;
 
         while !self.node_ref(x, Node::is_sentinel) {
@@ -381,33 +471,9 @@ where
     }
 
     /// Find all intervals in the map that overlaps with the given interval.
-    #[cfg(interval_tree_find_overlap_ordered)]
-    fn find_all_overlap_inner(
-        &self,
-        x: NodeIndex<Ix>,
-        interval: &Interval<T>,
-    ) -> Vec<(&Interval<T>, &V)> {
-        let mut list = vec![];
-        if self.node_ref(x, Node::interval).overlap(interval) {
-            list.push(self.node_ref(x, |nx| (nx.interval(), nx.value())));
-        }
-        if self.max(self.node_ref(x, Node::left)) >= Some(&interval.low) {
-            list.extend(self.find_all_overlap_inner(self.node_ref(x, Node::left), interval));
-        }
-        if self
-            .max(self.node_ref(x, Node::right))
-            .map(|rmax| IntervalRef::new(&self.node_ref(x, Node::interval).low, rmax))
-            .is_some_and(|i| i.overlap(interval))
-        {
-            list.extend(self.find_all_overlap_inner(self.node_ref(x, Node::right), interval));
-        }
-        list
-    }
-
-    /// Find all intervals in the map that overlaps with the given interval.
     ///
     /// The result is unordered because of breadth-first search to save stack size
-    fn find_all_overlap_inner_unordered(
+    fn find_all_overlap_inner(
         &self,
         x: NodeIndex<Ix>,
         interval: &Interval<T>,
@@ -680,13 +746,13 @@ where
     }
 
     /// Check if a node is a left child of its parent.
-    fn is_left_child(&self, node: NodeIndex<Ix>) -> bool {
-        self.parent_ref(node, Node::left) == node
+    fn is_left_child(&self, node_idx: NodeIndex<Ix>) -> bool {
+        self.parent_ref(node_idx, Node::left) == node_idx
     }
 
     /// Check if a node is a right child of its parent.
-    fn is_right_child(&self, node: NodeIndex<Ix>) -> bool {
-        self.parent_ref(node, Node::right) == node
+    fn is_right_child(&self, node_idx: NodeIndex<Ix>) -> bool {
+        self.parent_ref(node_idx, Node::right) == node_idx
     }
 
     /// Update nodes indices after remove
@@ -719,423 +785,792 @@ where
     }
 }
 
+#[cfg(feature = "graphviz")]
+impl<T, V, Ix> IntervalMap<T, V, Ix>
+where
+    T: Ord + Copy + Display,
+    V: Display,
+    Ix: IndexType,
+{
+    /// writes dot file to `filename`. `T` and `V` should implement `Display`.
+    pub fn draw(&self, filename: &str) -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(filename)?;
+        writeln!(file, "digraph {{")?;
+        // begin at 1, because 0 is sentinel node
+        for i in 1..self.nodes.len() {
+            self.nodes[i].draw(i, &mut file)?;
+        }
+        writeln!(file, "}}")
+    }
+}
+
+#[cfg(feature = "graphviz")]
+impl<T, V, Ix> IntervalMap<T, V, Ix>
+where
+    T: Ord + Copy + Display,
+    Ix: IndexType,
+{
+    /// Writes dot file to `filename` without values. `T` should implement `Display`.
+    pub fn draw_without_value(&self, filename: &str) -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(filename)?;
+        writeln!(file, "digraph {{")?;
+        // begin at 1, because 0 is sentinel node
+        for i in 1..self.nodes.len() {
+            self.nodes[i].draw_without_value(i, &mut file)?;
+        }
+        writeln!(file, "}}")
+    }
+}
+
 // Convenient methods for reference or mutate current/parent/left/right node
 impl<'a, T, V, Ix> IntervalMap<T, V, Ix>
 where
+    T: Ord,
     Ix: IndexType,
 {
-    fn node_ref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    pub(crate) fn node_ref<F, R>(&'a self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a Node<T, V, Ix>) -> R,
     {
-        op(&self.nodes[node.index()])
+        op(&self.nodes[node_idx.index()])
     }
 
-    pub(crate) fn node_mut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    pub(crate) fn node_mut<F, R>(&'a mut self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
     {
-        op(&mut self.nodes[node.index()])
+        op(&mut self.nodes[node_idx.index()])
     }
 
-    fn left_ref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    pub(crate) fn left_ref<F, R>(&'a self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a Node<T, V, Ix>) -> R,
     {
-        let idx = self.nodes[node.index()].left().index();
+        let idx = self.nodes[node_idx.index()].left().index();
         op(&self.nodes[idx])
     }
 
-    fn right_ref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    pub(crate) fn right_ref<F, R>(&'a self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a Node<T, V, Ix>) -> R,
     {
-        let idx = self.nodes[node.index()].right().index();
+        let idx = self.nodes[node_idx.index()].right().index();
         op(&self.nodes[idx])
     }
 
-    fn parent_ref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    fn parent_ref<F, R>(&'a self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a Node<T, V, Ix>) -> R,
     {
-        let idx = self.nodes[node.index()].parent().index();
+        let idx = self.nodes[node_idx.index()].parent().index();
         op(&self.nodes[idx])
     }
 
-    fn grand_parent_ref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    fn grand_parent_ref<F, R>(&'a self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a Node<T, V, Ix>) -> R,
     {
-        let parent_idx = self.nodes[node.index()].parent().index();
+        let parent_idx = self.nodes[node_idx.index()].parent().index();
         let grand_parent_idx = self.nodes[parent_idx].parent().index();
         op(&self.nodes[grand_parent_idx])
     }
 
-    fn left_mut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    fn left_mut<F, R>(&'a mut self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
     {
-        let idx = self.nodes[node.index()].left().index();
+        let idx = self.nodes[node_idx.index()].left().index();
         op(&mut self.nodes[idx])
     }
 
-    fn right_mut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    fn right_mut<F, R>(&'a mut self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
     {
-        let idx = self.nodes[node.index()].right().index();
+        let idx = self.nodes[node_idx.index()].right().index();
         op(&mut self.nodes[idx])
     }
 
-    fn parent_mut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    fn parent_mut<F, R>(&'a mut self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
     {
-        let idx = self.nodes[node.index()].parent().index();
+        let idx = self.nodes[node_idx.index()].parent().index();
         op(&mut self.nodes[idx])
     }
 
-    fn grand_parent_mut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    fn grand_parent_mut<F, R>(&'a mut self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
     {
-        let parent_idx = self.nodes[node.index()].parent().index();
+        let parent_idx = self.nodes[node_idx.index()].parent().index();
         let grand_parent_idx = self.nodes[parent_idx].parent().index();
         op(&mut self.nodes[grand_parent_idx])
     }
 
-    fn max(&self, node: NodeIndex<Ix>) -> Option<&T> {
-        let max_index = self.nodes[node.index()].max_index?.index();
+    pub(crate) fn max(&self, node_idx: NodeIndex<Ix>) -> Option<&T> {
+        let max_index = self.nodes[node_idx.index()].max_index?.index();
         self.nodes[max_index].interval.as_ref().map(|i| &i.high)
     }
 }
 
-/// An iterator over the entries of a `IntervalMap`.
-#[derive(Debug)]
-pub struct Iter<'a, T, V, Ix> {
-    /// Reference to the map
-    map_ref: &'a IntervalMap<T, V, Ix>,
-    /// Stack for iteration
-    stack: Option<Vec<NodeIndex<Ix>>>,
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct VisitedInterval<T> {
+    key: Interval<T>,
+    left: Option<Interval<T>>,
+    right: Option<Interval<T>>,
+    color: Color,
+    depth: i32,
 }
 
-impl<T, V, Ix> Iter<'_, T, V, Ix>
-where
-    Ix: IndexType,
-{
-    /// Initializes the stack
-    fn init_stack(&mut self) {
-        self.stack = Some(Self::left_link(self.map_ref, self.map_ref.root));
-    }
-
-    /// Pushes a link of nodes on the left to stack.
-    fn left_link(map_ref: &IntervalMap<T, V, Ix>, mut x: NodeIndex<Ix>) -> Vec<NodeIndex<Ix>> {
-        let mut nodes = vec![];
-        while !map_ref.node_ref(x, Node::is_sentinel) {
-            nodes.push(x);
-            x = map_ref.node_ref(x, Node::left);
+#[cfg(test)]
+impl<T> VisitedInterval<T> {
+    pub fn new(
+        key: Interval<T>,
+        left: Option<Interval<T>>,
+        right: Option<Interval<T>>,
+        color: Color,
+        depth: i32,
+    ) -> Self {
+        Self {
+            key,
+            left,
+            right,
+            color,
+            depth,
         }
-        nodes
     }
 }
 
-impl<'a, T, V, Ix> Iterator for Iter<'a, T, V, Ix>
+#[cfg(test)]
+impl<T, V, Ix> IntervalMap<T, V, Ix>
 where
+    T: Ord + Clone,
     Ix: IndexType,
 {
-    type Item = (&'a Interval<T>, &'a V);
+    fn visit_level(&self) -> Vec<VisitedInterval<T>> {
+        let mut res: Vec<VisitedInterval<T>> = Vec::new();
+        let mut queue = VecDeque::new();
+        queue.push_back(self.root);
+        let mut depth = 0;
+        while !queue.is_empty() {
+            for _ in 0..queue.len() {
+                let p = queue.pop_front().unwrap();
+                let node = &self.nodes[p.index()];
+                let p_left_node = &self.nodes[node.left().index()];
+                let p_right_node = &self.nodes[node.right().index()];
 
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.stack.is_none() {
-            self.init_stack();
+                res.push(VisitedInterval {
+                    key: node.interval.clone().unwrap(),
+                    left: p_left_node.interval.clone(),
+                    right: p_right_node.interval.clone(),
+                    color: node.color(),
+                    depth,
+                });
+                if !p_left_node.is_sentinel() {
+                    queue.push_back(node.left())
+                }
+                if !p_right_node.is_sentinel() {
+                    queue.push_back(node.right())
+                }
+            }
+            depth += 1;
         }
-        let stack = self.stack.as_mut().unwrap();
-        if stack.is_empty() {
-            return None;
-        }
-        let x = stack.pop().unwrap();
-        stack.extend(Self::left_link(
-            self.map_ref,
-            self.map_ref.node_ref(x, Node::right),
-        ));
-        Some(self.map_ref.node_ref(x, |xn| (xn.interval(), xn.value())))
+        res
     }
 }
 
 #[cfg(test)]
 mod test {
-    use std::collections::HashSet;
-
-    use rand::{rngs::StdRng, Rng, SeedableRng};
-
     use super::*;
 
-    struct IntervalGenerator {
-        rng: StdRng,
-        unique: HashSet<Interval<i32>>,
-        limit: i32,
-    }
-
-    impl IntervalGenerator {
-        fn new(seed: [u8; 32]) -> Self {
-            const LIMIT: i32 = 1000;
-            Self {
-                rng: SeedableRng::from_seed(seed),
-                unique: HashSet::new(),
-                limit: LIMIT,
-            }
-        }
-
-        fn next(&mut self) -> Interval<i32> {
-            let low = self.rng.gen_range(0..self.limit - 1);
-            let high = self.rng.gen_range((low + 1)..self.limit);
-            Interval::new(low, high)
-        }
-
-        fn next_unique(&mut self) -> Interval<i32> {
-            let mut interval = self.next();
-            while self.unique.contains(&interval) {
-                interval = self.next();
-            }
-            self.unique.insert(interval.clone());
-            interval
-        }
-
-        fn next_with_range(&mut self, range: i32) -> Interval<i32> {
-            let low = self.rng.gen_range(0..self.limit - 1);
-            let high = self
-                .rng
-                .gen_range((low + 1)..self.limit.min(low + 1 + range));
-            Interval::new(low, high)
-        }
-    }
-
-    impl<V> IntervalMap<i32, V> {
-        fn check_max(&self) {
-            let _ignore = self.check_max_inner(self.root);
-        }
-
-        fn check_max_inner(&self, x: NodeIndex<u32>) -> i32 {
-            if self.node_ref(x, Node::is_sentinel) {
-                return 0;
-            }
-            let l_max = self.check_max_inner(self.node_ref(x, Node::left));
-            let r_max = self.check_max_inner(self.node_ref(x, Node::right));
-            let max = self.node_ref(x, |x| x.interval().high.max(l_max).max(r_max));
-            assert_eq!(self.max(x), Some(&max));
-            max
-        }
-
-        /// 1. Every node is either red or black.
-        /// 2. The root is black.
-        /// 3. Every leaf (NIL) is black.
-        /// 4. If a node is red, then both its children are black.
-        /// 5. For each node, all simple paths from the node to descendant leaves contain the
-        /// same number of black nodes.
-        fn check_rb_properties(&self) {
-            assert!(matches!(
-                self.node_ref(self.root, Node::color),
-                Color::Black
-            ));
-            self.check_children_color(self.root);
-            self.check_black_height(self.root);
-        }
-
-        fn check_children_color(&self, x: NodeIndex<u32>) {
-            if self.node_ref(x, Node::is_sentinel) {
-                return;
-            }
-            self.check_children_color(self.node_ref(x, Node::left));
-            self.check_children_color(self.node_ref(x, Node::right));
-            if self.node_ref(x, Node::is_red) {
-                assert!(matches!(self.left_ref(x, Node::color), Color::Black));
-                assert!(matches!(self.right_ref(x, Node::color), Color::Black));
-            }
-        }
-
-        fn check_black_height(&self, x: NodeIndex<u32>) -> usize {
-            if self.node_ref(x, Node::is_sentinel) {
-                return 0;
-            }
-            let lefth = self.check_black_height(self.node_ref(x, Node::left));
-            let righth = self.check_black_height(self.node_ref(x, Node::right));
-            assert_eq!(lefth, righth);
-            if self.node_ref(x, Node::is_black) {
-                return lefth + 1;
-            }
-            lefth
-        }
-    }
-
-    fn with_map_and_generator<V>(test_fn: impl Fn(IntervalMap<i32, V>, IntervalGenerator)) {
-        let seeds = vec![[0; 32], [1; 32], [2; 32]];
-        for seed in seeds {
-            let gen = IntervalGenerator::new(seed);
-            let map = IntervalMap::new();
-            test_fn(map, gen);
-        }
-    }
-
     #[test]
-    fn red_black_tree_properties_is_satisfied() {
-        with_map_and_generator(|mut map, mut gen| {
-            let intervals: Vec<_> = std::iter::repeat_with(|| gen.next_unique())
-                .take(1000)
-                .collect();
-            for i in intervals.clone() {
-                let _ignore = map.insert(i, ());
-            }
-            map.check_rb_properties();
-        });
-    }
-
-    #[test]
-    fn map_len_will_update() {
-        with_map_and_generator(|mut map, mut gen| {
-            let intervals: Vec<_> = std::iter::repeat_with(|| gen.next_unique())
-                .take(100)
-                .collect();
-            for i in intervals.clone() {
-                let _ignore = map.insert(i, ());
-            }
-            assert_eq!(map.len(), 100);
-            for i in intervals {
-                let _ignore = map.remove(&i);
-            }
-            assert_eq!(map.len(), 0);
-        });
-    }
-
-    #[test]
-    fn check_overlap_is_ok() {
-        with_map_and_generator(|mut map, mut gen| {
-            let intervals: Vec<_> = std::iter::repeat_with(|| gen.next_with_range(10))
-                .take(100)
-                .collect();
-            for i in intervals.clone() {
-                let _ignore = map.insert(i, ());
-            }
-            let to_check: Vec<_> = std::iter::repeat_with(|| gen.next_with_range(10))
-                .take(1000)
-                .collect();
-            let expects: Vec<_> = to_check
-                .iter()
-                .map(|ci| intervals.iter().any(|i| ci.overlap(i)))
-                .collect();
-
-            for (ci, expect) in to_check.into_iter().zip(expects.into_iter()) {
-                assert_eq!(map.overlap(&ci), expect);
-            }
-        });
-    }
-
-    #[test]
-    fn check_max_is_ok() {
-        with_map_and_generator(|mut map, mut gen| {
-            let intervals: Vec<_> = std::iter::repeat_with(|| gen.next_unique())
-                .take(1000)
-                .collect();
-            for i in intervals.clone() {
-                let _ignore = map.insert(i, ());
-                map.check_max();
-            }
-            assert_eq!(map.len(), 1000);
-            for i in intervals {
-                let _ignore = map.remove(&i);
-                map.check_max();
-            }
-        });
-    }
-
-    #[test]
-    fn remove_non_exist_interval_will_do_nothing() {
-        with_map_and_generator(|mut map, mut gen| {
-            let intervals: Vec<_> = std::iter::repeat_with(|| gen.next_unique())
-                .take(1000)
-                .collect();
-            for i in intervals {
-                let _ignore = map.insert(i, ());
-            }
-            assert_eq!(map.len(), 1000);
-            let to_remove: Vec<_> = std::iter::repeat_with(|| gen.next_unique())
-                .take(1000)
-                .collect();
-            for i in to_remove {
-                let _ignore = map.remove(&i);
-            }
-            assert_eq!(map.len(), 1000);
-        });
-    }
-
-    #[test]
-    fn find_all_overlap_is_ok() {
-        with_map_and_generator(|mut map, mut gen| {
-            let intervals: Vec<_> = std::iter::repeat_with(|| gen.next_unique())
-                .take(1000)
-                .collect();
-            for i in intervals.clone() {
-                let _ignore = map.insert(i, ());
-            }
-            let to_find: Vec<_> = std::iter::repeat_with(|| gen.next()).take(1000).collect();
-
-            let expects: Vec<Vec<_>> = to_find
-                .iter()
-                .map(|ti| intervals.iter().filter(|i| ti.overlap(i)).collect())
-                .collect();
-
-            for (ti, mut expect) in to_find.into_iter().zip(expects.into_iter()) {
-                let mut result = map.find_all_overlap(&ti);
-                expect.sort_unstable();
-                result.sort_unstable();
-                assert_eq!(expect.len(), result.len());
-                for (e, r) in expect.into_iter().zip(result.into_iter()) {
-                    assert_eq!(e, r.0);
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn iterate_through_map_is_sorted() {
-        with_map_and_generator(|mut map, mut gen| {
-            let mut intervals: Vec<_> = std::iter::repeat_with(|| gen.next_unique())
-                .enumerate()
-                .take(1000)
-                .collect();
-            for (v, i) in intervals.clone() {
-                let _ignore = map.insert(i, v);
-            }
-            intervals.sort_unstable_by(|a, b| a.1.cmp(&b.1));
-
-            for ((ei, ev), (v, i)) in map.iter().zip(intervals.iter()) {
-                assert_eq!(ei, i);
-                assert_eq!(ev, v);
-            }
-        });
-    }
-
-    #[test]
-    fn interval_map_clear_is_ok() {
+    fn test_interval_tree_insert() {
         let mut map = IntervalMap::new();
-        map.insert(Interval::new(1, 3), 1);
-        map.insert(Interval::new(2, 4), 2);
-        map.insert(Interval::new(6, 7), 3);
-        assert_eq!(map.len(), 3);
-        map.clear();
-        assert_eq!(map.len(), 0);
-        assert!(map.is_empty());
-        assert_eq!(map.nodes.len(), 1);
-        assert!(map.nodes[0].is_sentinel());
+        map.insert(Interval::new(16, 21), 30);
+        map.insert(Interval::new(8, 9), 23);
+        map.insert(Interval::new(0, 3), 3);
+        map.insert(Interval::new(5, 8), 10);
+        map.insert(Interval::new(6, 10), 10);
+        map.insert(Interval::new(15, 23), 23);
+        map.insert(Interval::new(17, 19), 20);
+        map.insert(Interval::new(25, 30), 30);
+        map.insert(Interval::new(26, 27), 26);
+        map.insert(Interval::new(19, 20), 20);
+
+        let expected = vec![
+            VisitedInterval::new(
+                Interval::new(16, 21),
+                Some(Interval::new(8, 9)),
+                Some(Interval::new(25, 30)),
+                Color::Black,
+                0,
+            ),
+            VisitedInterval::new(
+                Interval::new(8, 9),
+                Some(Interval::new(5, 8)),
+                Some(Interval::new(15, 23)),
+                Color::Red,
+                1,
+            ),
+            VisitedInterval::new(
+                Interval::new(25, 30),
+                Some(Interval::new(17, 19)),
+                Some(Interval::new(26, 27)),
+                Color::Red,
+                1,
+            ),
+            VisitedInterval::new(
+                Interval::new(5, 8),
+                Some(Interval::new(0, 3)),
+                Some(Interval::new(6, 10)),
+                Color::Black,
+                2,
+            ),
+            VisitedInterval::new(Interval::new(15, 23), None, None, Color::Black, 2),
+            VisitedInterval::new(
+                Interval::new(17, 19),
+                None,
+                Some(Interval::new(19, 20)),
+                Color::Black,
+                2,
+            ),
+            VisitedInterval::new(Interval::new(26, 27), None, None, Color::Black, 2),
+            VisitedInterval::new(Interval::new(0, 3), None, None, Color::Red, 3),
+            VisitedInterval::new(Interval::new(6, 10), None, None, Color::Red, 3),
+            VisitedInterval::new(Interval::new(19, 20), None, None, Color::Red, 3),
+        ];
+
+        let res = map.visit_level();
+        assert_eq!(res, expected);
+    }
+
+    #[test]
+    fn test_interval_tree_self_balanced() {
+        let mut map = IntervalMap::new();
+        map.insert(Interval::new(0, 1), 0);
+        map.insert(Interval::new(1, 2), 0);
+        map.insert(Interval::new(3, 4), 0);
+        map.insert(Interval::new(5, 6), 0);
+        map.insert(Interval::new(7, 8), 0);
+        map.insert(Interval::new(8, 9), 0);
+
+        let expected = vec![
+            VisitedInterval::new(
+                Interval::new(1, 2),
+                Some(Interval::new(0, 1)),
+                Some(Interval::new(5, 6)),
+                Color::Black,
+                0,
+            ),
+            VisitedInterval::new(Interval::new(0, 1), None, None, Color::Black, 1),
+            VisitedInterval::new(
+                Interval::new(5, 6),
+                Some(Interval::new(3, 4)),
+                Some(Interval::new(7, 8)),
+                Color::Red,
+                1,
+            ),
+            VisitedInterval::new(Interval::new(3, 4), None, None, Color::Black, 2),
+            VisitedInterval::new(
+                Interval::new(7, 8),
+                None,
+                Some(Interval::new(8, 9)),
+                Color::Black,
+                2,
+            ),
+            VisitedInterval::new(Interval::new(8, 9), None, None, Color::Red, 3),
+        ];
+
+        let res = map.visit_level();
+        assert_eq!(res, expected);
+    }
+
+    #[test]
+    fn test_interval_tree_delete() {
+        let mut map = IntervalMap::new();
+        map.insert(Interval::new(510, 511), 0);
+        map.insert(Interval::new(82, 83), 0);
+        map.insert(Interval::new(830, 831), 0);
+        map.insert(Interval::new(11, 12), 0);
+        map.insert(Interval::new(383, 384), 0);
+        map.insert(Interval::new(647, 648), 0);
+        map.insert(Interval::new(899, 900), 0);
+        map.insert(Interval::new(261, 262), 0);
+        map.insert(Interval::new(410, 411), 0);
+        map.insert(Interval::new(514, 515), 0);
+        map.insert(Interval::new(815, 816), 0);
+        map.insert(Interval::new(888, 889), 0);
+        map.insert(Interval::new(972, 973), 0);
+        map.insert(Interval::new(238, 239), 0);
+        map.insert(Interval::new(292, 293), 0);
+        map.insert(Interval::new(953, 954), 0);
+
+        let expected_before_delete = vec![
+            VisitedInterval::new(
+                Interval::new(510, 511),
+                Some(Interval::new(82, 83)),
+                Some(Interval::new(830, 831)),
+                Color::Black,
+                0,
+            ),
+            VisitedInterval::new(
+                Interval::new(82, 83),
+                Some(Interval::new(11, 12)),
+                Some(Interval::new(383, 384)),
+                Color::Black,
+                1,
+            ),
+            VisitedInterval::new(
+                Interval::new(830, 831),
+                Some(Interval::new(647, 648)),
+                Some(Interval::new(899, 900)),
+                Color::Black,
+                1,
+            ),
+            VisitedInterval::new(Interval::new(11, 12), None, None, Color::Black, 2),
+            VisitedInterval::new(
+                Interval::new(383, 384),
+                Some(Interval::new(261, 262)),
+                Some(Interval::new(410, 411)),
+                Color::Red,
+                2,
+            ),
+            VisitedInterval::new(
+                Interval::new(647, 648),
+                Some(Interval::new(514, 515)),
+                Some(Interval::new(815, 816)),
+                Color::Black,
+                2,
+            ),
+            VisitedInterval::new(
+                Interval::new(899, 900),
+                Some(Interval::new(888, 889)),
+                Some(Interval::new(972, 973)),
+                Color::Red,
+                2,
+            ),
+            VisitedInterval::new(
+                Interval::new(261, 262),
+                Some(Interval::new(238, 239)),
+                Some(Interval::new(292, 293)),
+                Color::Black,
+                3,
+            ),
+            VisitedInterval::new(Interval::new(410, 411), None, None, Color::Black, 3),
+            VisitedInterval::new(Interval::new(514, 515), None, None, Color::Red, 3),
+            VisitedInterval::new(Interval::new(815, 816), None, None, Color::Red, 3),
+            VisitedInterval::new(Interval::new(888, 889), None, None, Color::Black, 3),
+            VisitedInterval::new(
+                Interval::new(972, 973),
+                Some(Interval::new(953, 954)),
+                None,
+                Color::Black,
+                3,
+            ),
+            VisitedInterval::new(Interval::new(238, 239), None, None, Color::Red, 4),
+            VisitedInterval::new(Interval::new(292, 293), None, None, Color::Red, 4),
+            VisitedInterval::new(Interval::new(953, 954), None, None, Color::Red, 4),
+        ];
+
+        let res = map.visit_level();
+        assert_eq!(res, expected_before_delete);
+
+        // delete the node "514"
+        let range514 = Interval::new(514, 515);
+        let deleted = map.remove(&range514);
+        assert!(deleted.is_some());
+
+        let expected_after_delete514 = vec![
+            VisitedInterval::new(
+                Interval::new(510, 511),
+                Some(Interval::new(82, 83)),
+                Some(Interval::new(830, 831)),
+                Color::Black,
+                0,
+            ),
+            VisitedInterval::new(
+                Interval::new(82, 83),
+                Some(Interval::new(11, 12)),
+                Some(Interval::new(383, 384)),
+                Color::Black,
+                1,
+            ),
+            VisitedInterval::new(
+                Interval::new(830, 831),
+                Some(Interval::new(647, 648)),
+                Some(Interval::new(899, 900)),
+                Color::Black,
+                1,
+            ),
+            VisitedInterval::new(Interval::new(11, 12), None, None, Color::Black, 2),
+            VisitedInterval::new(
+                Interval::new(383, 384),
+                Some(Interval::new(261, 262)),
+                Some(Interval::new(410, 411)),
+                Color::Red,
+                2,
+            ),
+            VisitedInterval::new(
+                Interval::new(647, 648),
+                None,
+                Some(Interval::new(815, 816)),
+                Color::Black,
+                2,
+            ),
+            VisitedInterval::new(
+                Interval::new(899, 900),
+                Some(Interval::new(888, 889)),
+                Some(Interval::new(972, 973)),
+                Color::Red,
+                2,
+            ),
+            VisitedInterval::new(
+                Interval::new(261, 262),
+                Some(Interval::new(238, 239)),
+                Some(Interval::new(292, 293)),
+                Color::Black,
+                3,
+            ),
+            VisitedInterval::new(Interval::new(410, 411), None, None, Color::Black, 3),
+            VisitedInterval::new(Interval::new(815, 816), None, None, Color::Red, 3),
+            VisitedInterval::new(Interval::new(888, 889), None, None, Color::Black, 3),
+            VisitedInterval::new(
+                Interval::new(972, 973),
+                Some(Interval::new(953, 954)),
+                None,
+                Color::Black,
+                3,
+            ),
+            VisitedInterval::new(Interval::new(238, 239), None, None, Color::Red, 4),
+            VisitedInterval::new(Interval::new(292, 293), None, None, Color::Red, 4),
+            VisitedInterval::new(Interval::new(953, 954), None, None, Color::Red, 4),
+        ];
+
+        let res = map.visit_level();
+        assert_eq!(res, expected_after_delete514);
+
+        // delete the node "11"
+        let range11 = Interval::new(11, 12);
+        let deleted = map.remove(&range11);
+        assert!(deleted.is_some());
+
+        let expected_after_delete11 = vec![
+            VisitedInterval::new(
+                Interval::new(510, 511),
+                Some(Interval::new(383, 384)),
+                Some(Interval::new(830, 831)),
+                Color::Black,
+                0,
+            ),
+            VisitedInterval::new(
+                Interval::new(383, 384),
+                Some(Interval::new(261, 262)),
+                Some(Interval::new(410, 411)),
+                Color::Black,
+                1,
+            ),
+            VisitedInterval::new(
+                Interval::new(830, 831),
+                Some(Interval::new(647, 648)),
+                Some(Interval::new(899, 900)),
+                Color::Black,
+                1,
+            ),
+            VisitedInterval::new(
+                Interval::new(261, 262),
+                Some(Interval::new(82, 83)),
+                Some(Interval::new(292, 293)),
+                Color::Red,
+                2,
+            ),
+            VisitedInterval::new(Interval::new(410, 411), None, None, Color::Black, 2),
+            VisitedInterval::new(
+                Interval::new(647, 648),
+                None,
+                Some(Interval::new(815, 816)),
+                Color::Black,
+                2,
+            ),
+            VisitedInterval::new(
+                Interval::new(899, 900),
+                Some(Interval::new(888, 889)),
+                Some(Interval::new(972, 973)),
+                Color::Red,
+                2,
+            ),
+            VisitedInterval::new(
+                Interval::new(82, 83),
+                None,
+                Some(Interval::new(238, 239)),
+                Color::Black,
+                3,
+            ),
+            VisitedInterval::new(Interval::new(292, 293), None, None, Color::Black, 3),
+            VisitedInterval::new(Interval::new(815, 816), None, None, Color::Red, 3),
+            VisitedInterval::new(Interval::new(888, 889), None, None, Color::Black, 3),
+            VisitedInterval::new(
+                Interval::new(972, 973),
+                Some(Interval::new(953, 954)),
+                None,
+                Color::Black,
+                3,
+            ),
+            VisitedInterval::new(Interval::new(238, 239), None, None, Color::Red, 4),
+            VisitedInterval::new(Interval::new(953, 954), None, None, Color::Red, 4),
+        ];
+
+        let res = map.visit_level();
+        assert_eq!(res, expected_after_delete11);
+    }
+
+    impl Interval<String> {
+        fn new_point(x: &str) -> Interval<String> {
+            let mut hx = x.to_owned();
+            hx.push('\0');
+            Interval {
+                low: x.to_owned(),
+                high: hx,
+            }
+        }
+    }
+
+    #[test]
+    fn test_interval_tree_intersects() {
+        let mut map = IntervalMap::<String, i32>::new();
+        map.insert(Interval::new(String::from("1"), String::from("3")), 123);
+
+        assert!(!map.overlaps(&Interval::new_point("0")), "contains 0");
+        assert!(map.overlaps(&Interval::new_point("1")), "missing 1");
+        assert!(map.overlaps(&Interval::new_point("11")), "missing 11");
+        assert!(map.overlaps(&Interval::new_point("2")), "missing 2");
+        assert!(!map.overlaps(&Interval::new_point("3")), "contains 3");
+    }
+
+    #[test]
+    fn test_interval_tree_find_all_overlap() {
+        let mut map = IntervalMap::<String, i32>::new();
+        map.insert(Interval::new(String::from("0"), String::from("1")), 123);
+        map.insert(Interval::new(String::from("0"), String::from("2")), 456);
+        map.insert(Interval::new(String::from("5"), String::from("6")), 789);
+        map.insert(Interval::new(String::from("6"), String::from("8")), 999);
+        map.insert(Interval::new(String::from("0"), String::from("3")), 0);
+
+        let tmp = map.node_ref(map.node_ref(map.root, Node::max_index), Node::interval);
+        assert_eq!(tmp, &Interval::new(String::from("6"), String::from("8")));
+
+        assert_eq!(map.find_all_overlap(&Interval::new_point("0")).len(), 3);
+        assert_eq!(map.find_all_overlap(&Interval::new_point("1")).len(), 2);
+        assert_eq!(map.find_all_overlap(&Interval::new_point("2")).len(), 1);
+        assert_eq!(map.find_all_overlap(&Interval::new_point("3")).len(), 0);
+        assert_eq!(map.find_all_overlap(&Interval::new_point("5")).len(), 1);
+        assert_eq!(map.find_all_overlap(&Interval::new_point("55")).len(), 1);
+        assert_eq!(map.find_all_overlap(&Interval::new_point("6")).len(), 1);
+    }
+
+    type TestCaseBFn = dyn Fn(&(&Interval<i32>, &())) -> bool;
+    struct TestCaseB {
+        f: Box<TestCaseBFn>,
+        wcount: i32,
+    }
+    #[test]
+    fn test_interval_tree_visit_exit() {
+        let ivls = vec![
+            Interval::new(1, 10),
+            Interval::new(2, 5),
+            Interval::new(3, 6),
+            Interval::new(4, 8),
+        ];
+        let ivl_range = Interval::new(0, 100);
+
+        let tests = [
+            TestCaseB {
+                f: Box::new(|_| false),
+                wcount: 1,
+            },
+            TestCaseB {
+                f: Box::new({
+                    let ivls = ivls.clone();
+                    move |v| v.0.low <= ivls[0].low
+                }),
+                wcount: 2,
+            },
+            TestCaseB {
+                f: Box::new({
+                    let ivls = ivls.clone();
+                    move |v| v.0.low < ivls[2].low
+                }),
+                wcount: 3,
+            },
+            TestCaseB {
+                f: Box::new(|_| true),
+                wcount: 4,
+            },
+        ];
+
+        for (i, tt) in tests.iter().enumerate() {
+            let mut map = IntervalMap::new();
+            ivls.iter().for_each(|v| {
+                map.insert(v.clone(), ());
+            });
+            let mut count = 0;
+            map.filter_iter(&ivl_range).find(|v| {
+                count += 1;
+                !(tt.f)(v)
+            });
+            assert_eq!(count, tt.wcount, "#{}: error", i);
+        }
+    }
+
+    struct TestCaseC {
+        ivls: Vec<Interval<i32>>,
+        chk_ivl: Interval<i32>,
+
+        w_contains: bool,
+    }
+    #[test]
+    fn test_interval_tree_contains() {
+        let tests = [
+            TestCaseC {
+                ivls: vec![Interval::new(1, 10)],
+                chk_ivl: Interval::new(0, 100),
+
+                w_contains: false,
+            },
+            TestCaseC {
+                ivls: vec![Interval::new(1, 10)],
+                chk_ivl: Interval::new(1, 10),
+
+                w_contains: true,
+            },
+            TestCaseC {
+                ivls: vec![Interval::new(1, 10)],
+                chk_ivl: Interval::new(2, 8),
+
+                w_contains: true,
+            },
+            TestCaseC {
+                ivls: vec![Interval::new(1, 5), Interval::new(6, 10)],
+                chk_ivl: Interval::new(1, 10),
+
+                w_contains: false,
+            },
+            TestCaseC {
+                ivls: vec![Interval::new(1, 5), Interval::new(3, 10)],
+                chk_ivl: Interval::new(1, 10),
+
+                w_contains: true,
+            },
+            TestCaseC {
+                ivls: vec![
+                    Interval::new(1, 4),
+                    Interval::new(4, 7),
+                    Interval::new(3, 10),
+                ],
+                chk_ivl: Interval::new(1, 10),
+
+                w_contains: true,
+            },
+            TestCaseC {
+                ivls: vec![],
+                chk_ivl: Interval::new(1, 10),
+
+                w_contains: false,
+            },
+        ];
+        for (i, tt) in tests.iter().enumerate() {
+            let mut map = IntervalMap::new();
+            tt.ivls.iter().for_each(|v| {
+                map.insert(v.clone(), ());
+            });
+            assert_eq!(map.contains(&tt.chk_ivl), tt.w_contains, "#{}: error", i);
+        }
+    }
+
+    struct TestCaseA {
+        ivls: Vec<Interval<i32>>,
+        visit_range: Interval<i32>,
+    }
+    #[test]
+    fn test_interval_tree_sorted_visit() {
+        let tests = [
+            TestCaseA {
+                ivls: vec![
+                    Interval::new(1, 10),
+                    Interval::new(2, 5),
+                    Interval::new(3, 6),
+                ],
+                visit_range: Interval::new(0, 100),
+            },
+            TestCaseA {
+                ivls: vec![
+                    Interval::new(1, 10),
+                    Interval::new(10, 12),
+                    Interval::new(3, 6),
+                ],
+                visit_range: Interval::new(0, 100),
+            },
+            TestCaseA {
+                ivls: vec![
+                    Interval::new(2, 3),
+                    Interval::new(3, 4),
+                    Interval::new(6, 7),
+                    Interval::new(5, 6),
+                ],
+                visit_range: Interval::new(0, 100),
+            },
+            TestCaseA {
+                ivls: vec![
+                    Interval::new(2, 3),
+                    Interval::new(2, 4),
+                    Interval::new(3, 7),
+                    Interval::new(2, 5),
+                    Interval::new(3, 8),
+                    Interval::new(3, 5),
+                ],
+                visit_range: Interval::new(0, 100),
+            },
+        ];
+        for (i, tt) in tests.iter().enumerate() {
+            let mut map = IntervalMap::new();
+            tt.ivls.iter().for_each(|v| {
+                map.insert(v.clone(), ());
+            });
+            let mut last = tt.ivls[0].low;
+            let count = map
+                .iter()
+                .filter(|v| v.0.overlap(&tt.visit_range))
+                .fold(0, |acc, v| {
+                    assert!(
+                        last <= v.0.low,
+                        "#{}: expected less than {}, got interval {:?}",
+                        i,
+                        last,
+                        v.0
+                    );
+                    last = v.0.low;
+                    acc + 1
+                });
+            assert_eq!(count, tt.ivls.len(), "#{}: did not cover all intervals.", i);
+        }
     }
 }
