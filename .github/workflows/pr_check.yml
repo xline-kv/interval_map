@@ -1,0 +1,64 @@
+name: PR Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy
+          override: true
+
+      - name: Make script executable
+        run: chmod +x ci/scripts/check-trailing-spaces.sh
+
+      - name: Trailing spaces check
+        run: ci/scripts/check-trailing-spaces.sh
+
+      - name: Audit
+        run: cargo audit
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --verbose
+
+  commit:
+    name: Commit Message Validation
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: git show-ref
+      - uses: actions-rs/install@v0.1
+        with:
+          crate: git-cz
+          version: latest
+      - name: Validate commit messages
+        run: git-cz check ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+
+  spell-check:
+    name: Spell Check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Spelling
+        uses: crate-ci/typos@v1.23.1
