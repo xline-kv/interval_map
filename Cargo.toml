@@ -8,14 +8,20 @@ license = "Apache-2.0"
 keywords = ["Interval Tree", "Augmented Tree", "Red-Black Tree"]
 
 [dependencies]
+serde = { version = "1.0", default-features = false, features = [
+    "derive",
+    "std",
+], optional = true }
 
 [dev-dependencies]
 criterion = "0.5.1"
 rand = "0.8.5"
+serde_json = "1.0"
 
 [features]
 default = []
-interval_tree_find_overlap_ordered = []
+graphviz = []
+serde = ["dep:serde"]
 
 [[bench]]
 name = "bench"

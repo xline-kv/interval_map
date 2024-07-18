@@ -5,7 +5,10 @@ use crate::node::Node;
 
 /// A view into a single entry in a map, which may either be vacant or occupied.
 #[derive(Debug)]
-pub enum Entry<'a, T, V, Ix> {
+pub enum Entry<'a, T, V, Ix>
+where
+    T: Ord,
+{
     /// An occupied entry.
     Occupied(OccupiedEntry<'a, T, V, Ix>),
     /// A vacant entry.
@@ -15,17 +18,23 @@ pub enum Entry<'a, T, V, Ix> {
 /// A view into an occupied entry in a `IntervalMap`.
 /// It is part of the [`Entry`] enum.
 #[derive(Debug)]
-pub struct OccupiedEntry<'a, T, V, Ix> {
+pub struct OccupiedEntry<'a, T, V, Ix>
+where
+    T: Ord,
+{
     /// Reference to the map
     pub map_ref: &'a mut IntervalMap<T, V, Ix>,
     /// The entry node
-    pub node: NodeIndex<Ix>,
+    pub node_idx: NodeIndex<Ix>,
 }
 
 /// A view into a vacant entry in a `IntervalMap`.
 /// It is part of the [`Entry`] enum.
 #[derive(Debug)]
-pub struct VacantEntry<'a, T, V, Ix> {
+pub struct VacantEntry<'a, T, V, Ix>
+where
+    T: Ord,
+{
     /// Mutable reference to the map
     pub map_ref: &'a mut IntervalMap<T, V, Ix>,
     /// The interval of this entry
@@ -53,7 +62,7 @@ where
     #[inline]
     pub fn or_insert(self, default: V) -> &'a mut V {
         match self {
-            Entry::Occupied(entry) => entry.map_ref.node_mut(entry.node, Node::value_mut),
+            Entry::Occupied(entry) => entry.map_ref.node_mut(entry.node_idx, Node::value_mut),
             Entry::Vacant(entry) => {
                 let entry_idx = NodeIndex::new(entry.map_ref.nodes.len());
                 let _ignore = entry.map_ref.insert(entry.interval, default);
@@ -88,7 +97,7 @@ where
     {
         match self {
             Entry::Occupied(entry) => {
-                f(entry.map_ref.node_mut(entry.node, Node::value_mut));
+                f(entry.map_ref.node_mut(entry.node_idx, Node::value_mut));
                 Self::Occupied(entry)
             }
             Entry::Vacant(entry) => Self::Vacant(entry),
