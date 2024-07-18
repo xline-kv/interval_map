@@ -50,7 +50,7 @@ where
         }
     }
 
-    /// insert an interval-value pair into the map.
+    /// Insert an interval-value pair into the map.
     /// If the interval exists, overwrite and return the previous value.
     ///
     /// # Panics
