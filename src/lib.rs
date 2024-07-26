@@ -29,4 +29,4 @@ mod node;
 
 pub use entry::{Entry, OccupiedEntry, VacantEntry};
 pub use interval::Interval;
-pub use intervalmap::{IntervalMap, Iter};
+pub use intervalmap::IntervalMap;
