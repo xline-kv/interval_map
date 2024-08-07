@@ -65,7 +65,7 @@ fn interval_map_insert_remove(count: usize, bench: &mut Bencher) {
             black_box(map.insert(i, ()));
         }
         for i in &intervals {
-            black_box(map.remove(&i));
+            black_box(map.remove(i));
         }
     });
 }
