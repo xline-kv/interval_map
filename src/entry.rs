@@ -19,7 +19,7 @@ pub struct OccupiedEntry<'a, T, V, Ix> {
     /// Reference to the map
     pub map_ref: &'a mut IntervalMap<T, V, Ix>,
     /// The entry node
-    pub node: NodeIndex<Ix>,
+    pub node_idx: NodeIndex<Ix>,
 }
 
 /// A view into a vacant entry in a `IntervalMap`.
@@ -53,7 +53,7 @@ where
     #[inline]
     pub fn or_insert(self, default: V) -> &'a mut V {
         match self {
-            Entry::Occupied(entry) => entry.map_ref.node_mut(entry.node, Node::value_mut),
+            Entry::Occupied(entry) => entry.map_ref.node_mut(entry.node_idx, Node::value_mut),
             Entry::Vacant(entry) => {
                 let entry_idx = NodeIndex::new(entry.map_ref.nodes.len());
                 let _ignore = entry.map_ref.insert(entry.interval, default);
@@ -88,7 +88,7 @@ where
     {
         match self {
             Entry::Occupied(entry) => {
-                f(entry.map_ref.node_mut(entry.node, Node::value_mut));
+                f(entry.map_ref.node_mut(entry.node_idx, Node::value_mut));
                 Self::Occupied(entry)
             }
             Entry::Vacant(entry) => Self::Vacant(entry),

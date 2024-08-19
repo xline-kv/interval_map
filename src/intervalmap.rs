@@ -2,9 +2,22 @@ use crate::entry::{Entry, OccupiedEntry, VacantEntry};
 use crate::index::{DefaultIx, IndexType, NodeIndex};
 use crate::interval::{Interval, IntervalRef};
 use crate::node::{Color, Node};
+
 use std::collections::VecDeque;
+use std::fmt::Debug;
+
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "graphviz")]
+use std::fmt::Display;
+#[cfg(feature = "graphviz")]
+use std::fs::OpenOptions;
+#[cfg(feature = "graphviz")]
+use std::io::Write;
 
 /// An interval-value map, which support operations on dynamic sets of intervals.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug)]
 pub struct IntervalMap<T, V, Ix = DefaultIx> {
     /// Vector that stores nodes
@@ -24,11 +37,11 @@ where
     #[inline]
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
-        let mut nodes = vec![Self::new_sentinel()];
+        let mut nodes = vec![Node::new_sentinel()];
         nodes.reserve(capacity);
         IntervalMap {
             nodes,
-            root: Self::sentinel(),
+            root: NodeIndex::SENTINEL,
             len: 0,
         }
     }
@@ -52,10 +65,11 @@ where
     #[inline]
     pub fn insert(&mut self, interval: Interval<T>, value: V) -> Option<V> {
         let node_idx = NodeIndex::new(self.nodes.len());
-        let node = Self::new_node(interval, value, node_idx);
+        let node = Node::new(interval, value, node_idx);
         // check for max capacity, except if we use usize
         assert!(
-            <Ix as IndexType>::max().index() == !0 || NodeIndex::end() != node_idx,
+            <Ix as IndexType>::max().index() == !0
+                || <NodeIndex<Ix> as IndexType>::max() != node_idx,
             "Reached maximum number of nodes"
         );
         self.nodes.push(node);
@@ -101,18 +115,21 @@ where
     /// map.insert(Interval::new(1, 3), ());
     /// map.insert(Interval::new(6, 7), ());
     /// map.insert(Interval::new(9, 11), ());
-    /// assert!(map.overlap(&Interval::new(2, 5)));
-    /// assert!(map.overlap(&Interval::new(1, 17)));
-    /// assert!(!map.overlap(&Interval::new(3, 6)));
-    /// assert!(!map.overlap(&Interval::new(11, 23)));
+    /// assert!(map.overlaps(&Interval::new(2, 5)));
+    /// assert!(map.overlaps(&Interval::new(1, 17)));
+    /// assert!(!map.overlaps(&Interval::new(3, 6)));
+    /// assert!(!map.overlaps(&Interval::new(11, 23)));
     /// ```
     #[inline]
-    pub fn overlap(&self, interval: &Interval<T>) -> bool {
+    pub fn overlaps(&self, interval: &Interval<T>) -> bool {
         let node_idx = self.search(interval);
         !self.node_ref(node_idx, Node::is_sentinel)
     }
 
     /// Find all intervals in the map that overlaps with the given interval.
+    ///
+    /// # Note
+    /// This method's returned data is unordered. To get ordered data, please use `find_all_overlap_ordered`.
     ///
     /// # Example
     /// ```rust
@@ -132,7 +149,7 @@ where
         if self.node_ref(self.root, Node::is_sentinel) {
             Vec::new()
         } else {
-            self.find_all_overlap_inner_unordered(self.root, interval)
+            self.find_all_overlap_inner(self.root, interval)
         }
     }
 
@@ -172,16 +189,6 @@ where
             .map(|idx| self.node_mut(idx, Node::value_mut))
     }
 
-    /// Get an iterator over the entries of the map, sorted by key.
-    #[inline]
-    #[must_use]
-    pub fn iter(&self) -> Iter<'_, T, V, Ix> {
-        Iter {
-            map_ref: self,
-            stack: None,
-        }
-    }
-
     /// Get the given key's corresponding entry in the map for in-place manipulation.
     ///
     /// # Example
@@ -199,9 +206,9 @@ where
     #[inline]
     pub fn entry(&mut self, interval: Interval<T>) -> Entry<'_, T, V, Ix> {
         match self.search_exact(&interval) {
-            Some(node) => Entry::Occupied(OccupiedEntry {
+            Some(node_idx) => Entry::Occupied(OccupiedEntry {
                 map_ref: self,
-                node,
+                node_idx,
             }),
             None => Entry::Vacant(VacantEntry {
                 map_ref: self,
@@ -214,8 +221,8 @@ where
     #[inline]
     pub fn clear(&mut self) {
         self.nodes.clear();
-        self.nodes.push(Self::new_sentinel());
-        self.root = Self::sentinel();
+        self.nodes.push(Node::new_sentinel());
+        self.root = NodeIndex::SENTINEL;
         self.len = 0;
     }
 
@@ -242,11 +249,7 @@ where
     #[inline]
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            nodes: vec![Self::new_sentinel()],
-            root: Self::sentinel(),
-            len: 0,
-        }
+        Self::with_capacity(0)
     }
 }
 
@@ -265,46 +268,9 @@ where
     T: Ord,
     Ix: IndexType,
 {
-    /// Create a new sentinel node
-    fn new_sentinel() -> Node<T, V, Ix> {
-        Node {
-            interval: None,
-            value: None,
-            max_index: None,
-            left: None,
-            right: None,
-            parent: None,
-            color: Color::Black,
-        }
-    }
-
-    /// Create a new tree node
-    fn new_node(interval: Interval<T>, value: V, index: NodeIndex<Ix>) -> Node<T, V, Ix> {
-        Node {
-            max_index: Some(index),
-            interval: Some(interval),
-            value: Some(value),
-            left: Some(Self::sentinel()),
-            right: Some(Self::sentinel()),
-            parent: Some(Self::sentinel()),
-            color: Color::Red,
-        }
-    }
-
-    /// Get the sentinel node index
-    fn sentinel() -> NodeIndex<Ix> {
-        NodeIndex::new(0)
-    }
-}
-
-impl<T, V, Ix> IntervalMap<T, V, Ix>
-where
-    T: Ord,
-    Ix: IndexType,
-{
-    /// Insert a node into the tree.
+    /// insert a node into the tree.
     fn insert_inner(&mut self, z: NodeIndex<Ix>) -> Option<V> {
-        let mut y = Self::sentinel();
+        let mut y = NodeIndex::SENTINEL;
         let mut x = self.root;
 
         while !self.node_ref(x, Node::is_sentinel) {
@@ -381,33 +347,9 @@ where
     }
 
     /// Find all intervals in the map that overlaps with the given interval.
-    #[cfg(interval_tree_find_overlap_ordered)]
-    fn find_all_overlap_inner(
-        &self,
-        x: NodeIndex<Ix>,
-        interval: &Interval<T>,
-    ) -> Vec<(&Interval<T>, &V)> {
-        let mut list = vec![];
-        if self.node_ref(x, Node::interval).overlap(interval) {
-            list.push(self.node_ref(x, |nx| (nx.interval(), nx.value())));
-        }
-        if self.max(self.node_ref(x, Node::left)) >= Some(&interval.low) {
-            list.extend(self.find_all_overlap_inner(self.node_ref(x, Node::left), interval));
-        }
-        if self
-            .max(self.node_ref(x, Node::right))
-            .map(|rmax| IntervalRef::new(&self.node_ref(x, Node::interval).low, rmax))
-            .is_some_and(|i| i.overlap(interval))
-        {
-            list.extend(self.find_all_overlap_inner(self.node_ref(x, Node::right), interval));
-        }
-        list
-    }
-
-    /// Find all intervals in the map that overlaps with the given interval.
     ///
     /// The result is unordered because of breadth-first search to save stack size
-    fn find_all_overlap_inner_unordered(
+    fn find_all_overlap_inner(
         &self,
         x: NodeIndex<Ix>,
         interval: &Interval<T>,
@@ -416,7 +358,7 @@ where
         let mut queue = VecDeque::new();
         queue.push_back(x);
         while let Some(p) = queue.pop_front() {
-            if self.node_ref(p, Node::interval).overlap(interval) {
+            if self.node_ref(p, Node::interval).overlaps(interval) {
                 list.push(self.node_ref(p, |np| (np.interval(), np.value())));
             }
             let p_left = self.node_ref(p, Node::left);
@@ -442,7 +384,7 @@ where
         while self
             .node_ref(x, Node::sentinel)
             .map(Node::interval)
-            .is_some_and(|xi| !xi.overlap(interval))
+            .is_some_and(|xi| !xi.overlaps(interval))
         {
             if self.max(self.node_ref(x, Node::left)) > Some(&interval.low) {
                 x = self.node_ref(x, Node::left);
@@ -680,13 +622,13 @@ where
     }
 
     /// Check if a node is a left child of its parent.
-    fn is_left_child(&self, node: NodeIndex<Ix>) -> bool {
-        self.parent_ref(node, Node::left) == node
+    fn is_left_child(&self, node_idx: NodeIndex<Ix>) -> bool {
+        self.parent_ref(node_idx, Node::left) == node_idx
     }
 
     /// Check if a node is a right child of its parent.
-    fn is_right_child(&self, node: NodeIndex<Ix>) -> bool {
-        self.parent_ref(node, Node::right) == node
+    fn is_right_child(&self, node_idx: NodeIndex<Ix>) -> bool {
+        self.parent_ref(node_idx, Node::right) == node_idx
     }
 
     /// Update nodes indices after remove
@@ -719,423 +661,149 @@ where
     }
 }
 
+#[cfg(feature = "graphviz")]
+impl<T, V, Ix> IntervalMap<T, V, Ix>
+where
+    T: Ord + Copy + Display,
+    V: Display,
+    Ix: IndexType,
+{
+    /// writes dot file to `filename`. `T` and `V` should implement `Display`.
+    pub fn draw(&self, filename: &str) -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(filename)?;
+        writeln!(file, "digraph {{")?;
+        // begin at 1, because 0 is sentinel node
+        for i in 1..self.nodes.len() {
+            self.nodes[i].draw(i, &mut file)?;
+        }
+        writeln!(file, "}}")
+    }
+}
+
+#[cfg(feature = "graphviz")]
+impl<T, V, Ix> IntervalMap<T, V, Ix>
+where
+    T: Ord + Copy + Display,
+    Ix: IndexType,
+{
+    /// Writes dot file to `filename` without values. `T` should implement `Display`.
+    pub fn draw_without_value(&self, filename: &str) -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(filename)?;
+        writeln!(file, "digraph {{")?;
+        // begin at 1, because 0 is sentinel node
+        for i in 1..self.nodes.len() {
+            self.nodes[i].draw_without_value(i, &mut file)?;
+        }
+        writeln!(file, "}}")
+    }
+}
+
 // Convenient methods for reference or mutate current/parent/left/right node
 impl<'a, T, V, Ix> IntervalMap<T, V, Ix>
 where
+    T: Ord,
     Ix: IndexType,
 {
-    fn node_ref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    pub(crate) fn node_ref<F, R>(&'a self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a Node<T, V, Ix>) -> R,
     {
-        op(&self.nodes[node.index()])
+        op(&self.nodes[node_idx.index()])
     }
 
-    pub(crate) fn node_mut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    pub(crate) fn node_mut<F, R>(&'a mut self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
     {
-        op(&mut self.nodes[node.index()])
+        op(&mut self.nodes[node_idx.index()])
     }
 
-    fn left_ref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    pub(crate) fn left_ref<F, R>(&'a self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a Node<T, V, Ix>) -> R,
     {
-        let idx = self.nodes[node.index()].left().index();
+        let idx = self.nodes[node_idx.index()].left().index();
         op(&self.nodes[idx])
     }
 
-    fn right_ref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    pub(crate) fn right_ref<F, R>(&'a self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a Node<T, V, Ix>) -> R,
     {
-        let idx = self.nodes[node.index()].right().index();
+        let idx = self.nodes[node_idx.index()].right().index();
         op(&self.nodes[idx])
     }
 
-    fn parent_ref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    fn parent_ref<F, R>(&'a self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a Node<T, V, Ix>) -> R,
     {
-        let idx = self.nodes[node.index()].parent().index();
+        let idx = self.nodes[node_idx.index()].parent().index();
         op(&self.nodes[idx])
     }
 
-    fn grand_parent_ref<F, R>(&'a self, node: NodeIndex<Ix>, op: F) -> R
+    fn grand_parent_ref<F, R>(&'a self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a Node<T, V, Ix>) -> R,
     {
-        let parent_idx = self.nodes[node.index()].parent().index();
+        let parent_idx = self.nodes[node_idx.index()].parent().index();
         let grand_parent_idx = self.nodes[parent_idx].parent().index();
         op(&self.nodes[grand_parent_idx])
     }
 
-    fn left_mut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    fn left_mut<F, R>(&'a mut self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
     {
-        let idx = self.nodes[node.index()].left().index();
+        let idx = self.nodes[node_idx.index()].left().index();
         op(&mut self.nodes[idx])
     }
 
-    fn right_mut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    fn right_mut<F, R>(&'a mut self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
     {
-        let idx = self.nodes[node.index()].right().index();
+        let idx = self.nodes[node_idx.index()].right().index();
         op(&mut self.nodes[idx])
     }
 
-    fn parent_mut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    fn parent_mut<F, R>(&'a mut self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
     {
-        let idx = self.nodes[node.index()].parent().index();
+        let idx = self.nodes[node_idx.index()].parent().index();
         op(&mut self.nodes[idx])
     }
 
-    fn grand_parent_mut<F, R>(&'a mut self, node: NodeIndex<Ix>, op: F) -> R
+    fn grand_parent_mut<F, R>(&'a mut self, node_idx: NodeIndex<Ix>, op: F) -> R
     where
         R: 'a,
         F: FnOnce(&'a mut Node<T, V, Ix>) -> R,
     {
-        let parent_idx = self.nodes[node.index()].parent().index();
+        let parent_idx = self.nodes[node_idx.index()].parent().index();
         let grand_parent_idx = self.nodes[parent_idx].parent().index();
         op(&mut self.nodes[grand_parent_idx])
     }
 
-    fn max(&self, node: NodeIndex<Ix>) -> Option<&T> {
-        let max_index = self.nodes[node.index()].max_index?.index();
+    pub(crate) fn max(&self, node_idx: NodeIndex<Ix>) -> Option<&T> {
+        let max_index = self.nodes[node_idx.index()].max_index?.index();
         self.nodes[max_index].interval.as_ref().map(|i| &i.high)
-    }
-}
-
-/// An iterator over the entries of a `IntervalMap`.
-#[derive(Debug)]
-pub struct Iter<'a, T, V, Ix> {
-    /// Reference to the map
-    map_ref: &'a IntervalMap<T, V, Ix>,
-    /// Stack for iteration
-    stack: Option<Vec<NodeIndex<Ix>>>,
-}
-
-impl<T, V, Ix> Iter<'_, T, V, Ix>
-where
-    Ix: IndexType,
-{
-    /// Initializes the stack
-    fn init_stack(&mut self) {
-        self.stack = Some(Self::left_link(self.map_ref, self.map_ref.root));
-    }
-
-    /// Pushes a link of nodes on the left to stack.
-    fn left_link(map_ref: &IntervalMap<T, V, Ix>, mut x: NodeIndex<Ix>) -> Vec<NodeIndex<Ix>> {
-        let mut nodes = vec![];
-        while !map_ref.node_ref(x, Node::is_sentinel) {
-            nodes.push(x);
-            x = map_ref.node_ref(x, Node::left);
-        }
-        nodes
-    }
-}
-
-impl<'a, T, V, Ix> Iterator for Iter<'a, T, V, Ix>
-where
-    Ix: IndexType,
-{
-    type Item = (&'a Interval<T>, &'a V);
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.stack.is_none() {
-            self.init_stack();
-        }
-        let stack = self.stack.as_mut().unwrap();
-        if stack.is_empty() {
-            return None;
-        }
-        let x = stack.pop().unwrap();
-        stack.extend(Self::left_link(
-            self.map_ref,
-            self.map_ref.node_ref(x, Node::right),
-        ));
-        Some(self.map_ref.node_ref(x, |xn| (xn.interval(), xn.value())))
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use std::collections::HashSet;
-
-    use rand::{rngs::StdRng, Rng, SeedableRng};
-
-    use super::*;
-
-    struct IntervalGenerator {
-        rng: StdRng,
-        unique: HashSet<Interval<i32>>,
-        limit: i32,
-    }
-
-    impl IntervalGenerator {
-        fn new(seed: [u8; 32]) -> Self {
-            const LIMIT: i32 = 1000;
-            Self {
-                rng: SeedableRng::from_seed(seed),
-                unique: HashSet::new(),
-                limit: LIMIT,
-            }
-        }
-
-        fn next(&mut self) -> Interval<i32> {
-            let low = self.rng.gen_range(0..self.limit - 1);
-            let high = self.rng.gen_range((low + 1)..self.limit);
-            Interval::new(low, high)
-        }
-
-        fn next_unique(&mut self) -> Interval<i32> {
-            let mut interval = self.next();
-            while self.unique.contains(&interval) {
-                interval = self.next();
-            }
-            self.unique.insert(interval.clone());
-            interval
-        }
-
-        fn next_with_range(&mut self, range: i32) -> Interval<i32> {
-            let low = self.rng.gen_range(0..self.limit - 1);
-            let high = self
-                .rng
-                .gen_range((low + 1)..self.limit.min(low + 1 + range));
-            Interval::new(low, high)
-        }
-    }
-
-    impl<V> IntervalMap<i32, V> {
-        fn check_max(&self) {
-            let _ignore = self.check_max_inner(self.root);
-        }
-
-        fn check_max_inner(&self, x: NodeIndex<u32>) -> i32 {
-            if self.node_ref(x, Node::is_sentinel) {
-                return 0;
-            }
-            let l_max = self.check_max_inner(self.node_ref(x, Node::left));
-            let r_max = self.check_max_inner(self.node_ref(x, Node::right));
-            let max = self.node_ref(x, |x| x.interval().high.max(l_max).max(r_max));
-            assert_eq!(self.max(x), Some(&max));
-            max
-        }
-
-        /// 1. Every node is either red or black.
-        /// 2. The root is black.
-        /// 3. Every leaf (NIL) is black.
-        /// 4. If a node is red, then both its children are black.
-        /// 5. For each node, all simple paths from the node to descendant leaves contain the
-        /// same number of black nodes.
-        fn check_rb_properties(&self) {
-            assert!(matches!(
-                self.node_ref(self.root, Node::color),
-                Color::Black
-            ));
-            self.check_children_color(self.root);
-            self.check_black_height(self.root);
-        }
-
-        fn check_children_color(&self, x: NodeIndex<u32>) {
-            if self.node_ref(x, Node::is_sentinel) {
-                return;
-            }
-            self.check_children_color(self.node_ref(x, Node::left));
-            self.check_children_color(self.node_ref(x, Node::right));
-            if self.node_ref(x, Node::is_red) {
-                assert!(matches!(self.left_ref(x, Node::color), Color::Black));
-                assert!(matches!(self.right_ref(x, Node::color), Color::Black));
-            }
-        }
-
-        fn check_black_height(&self, x: NodeIndex<u32>) -> usize {
-            if self.node_ref(x, Node::is_sentinel) {
-                return 0;
-            }
-            let lefth = self.check_black_height(self.node_ref(x, Node::left));
-            let righth = self.check_black_height(self.node_ref(x, Node::right));
-            assert_eq!(lefth, righth);
-            if self.node_ref(x, Node::is_black) {
-                return lefth + 1;
-            }
-            lefth
-        }
-    }
-
-    fn with_map_and_generator<V>(test_fn: impl Fn(IntervalMap<i32, V>, IntervalGenerator)) {
-        let seeds = vec![[0; 32], [1; 32], [2; 32]];
-        for seed in seeds {
-            let gen = IntervalGenerator::new(seed);
-            let map = IntervalMap::new();
-            test_fn(map, gen);
-        }
-    }
-
-    #[test]
-    fn red_black_tree_properties_is_satisfied() {
-        with_map_and_generator(|mut map, mut gen| {
-            let intervals: Vec<_> = std::iter::repeat_with(|| gen.next_unique())
-                .take(1000)
-                .collect();
-            for i in intervals.clone() {
-                let _ignore = map.insert(i, ());
-            }
-            map.check_rb_properties();
-        });
-    }
-
-    #[test]
-    fn map_len_will_update() {
-        with_map_and_generator(|mut map, mut gen| {
-            let intervals: Vec<_> = std::iter::repeat_with(|| gen.next_unique())
-                .take(100)
-                .collect();
-            for i in intervals.clone() {
-                let _ignore = map.insert(i, ());
-            }
-            assert_eq!(map.len(), 100);
-            for i in intervals {
-                let _ignore = map.remove(&i);
-            }
-            assert_eq!(map.len(), 0);
-        });
-    }
-
-    #[test]
-    fn check_overlap_is_ok() {
-        with_map_and_generator(|mut map, mut gen| {
-            let intervals: Vec<_> = std::iter::repeat_with(|| gen.next_with_range(10))
-                .take(100)
-                .collect();
-            for i in intervals.clone() {
-                let _ignore = map.insert(i, ());
-            }
-            let to_check: Vec<_> = std::iter::repeat_with(|| gen.next_with_range(10))
-                .take(1000)
-                .collect();
-            let expects: Vec<_> = to_check
-                .iter()
-                .map(|ci| intervals.iter().any(|i| ci.overlap(i)))
-                .collect();
-
-            for (ci, expect) in to_check.into_iter().zip(expects.into_iter()) {
-                assert_eq!(map.overlap(&ci), expect);
-            }
-        });
-    }
-
-    #[test]
-    fn check_max_is_ok() {
-        with_map_and_generator(|mut map, mut gen| {
-            let intervals: Vec<_> = std::iter::repeat_with(|| gen.next_unique())
-                .take(1000)
-                .collect();
-            for i in intervals.clone() {
-                let _ignore = map.insert(i, ());
-                map.check_max();
-            }
-            assert_eq!(map.len(), 1000);
-            for i in intervals {
-                let _ignore = map.remove(&i);
-                map.check_max();
-            }
-        });
-    }
-
-    #[test]
-    fn remove_non_exist_interval_will_do_nothing() {
-        with_map_and_generator(|mut map, mut gen| {
-            let intervals: Vec<_> = std::iter::repeat_with(|| gen.next_unique())
-                .take(1000)
-                .collect();
-            for i in intervals {
-                let _ignore = map.insert(i, ());
-            }
-            assert_eq!(map.len(), 1000);
-            let to_remove: Vec<_> = std::iter::repeat_with(|| gen.next_unique())
-                .take(1000)
-                .collect();
-            for i in to_remove {
-                let _ignore = map.remove(&i);
-            }
-            assert_eq!(map.len(), 1000);
-        });
-    }
-
-    #[test]
-    fn find_all_overlap_is_ok() {
-        with_map_and_generator(|mut map, mut gen| {
-            let intervals: Vec<_> = std::iter::repeat_with(|| gen.next_unique())
-                .take(1000)
-                .collect();
-            for i in intervals.clone() {
-                let _ignore = map.insert(i, ());
-            }
-            let to_find: Vec<_> = std::iter::repeat_with(|| gen.next()).take(1000).collect();
-
-            let expects: Vec<Vec<_>> = to_find
-                .iter()
-                .map(|ti| intervals.iter().filter(|i| ti.overlap(i)).collect())
-                .collect();
-
-            for (ti, mut expect) in to_find.into_iter().zip(expects.into_iter()) {
-                let mut result = map.find_all_overlap(&ti);
-                expect.sort_unstable();
-                result.sort_unstable();
-                assert_eq!(expect.len(), result.len());
-                for (e, r) in expect.into_iter().zip(result.into_iter()) {
-                    assert_eq!(e, r.0);
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn iterate_through_map_is_sorted() {
-        with_map_and_generator(|mut map, mut gen| {
-            let mut intervals: Vec<_> = std::iter::repeat_with(|| gen.next_unique())
-                .enumerate()
-                .take(1000)
-                .collect();
-            for (v, i) in intervals.clone() {
-                let _ignore = map.insert(i, v);
-            }
-            intervals.sort_unstable_by(|a, b| a.1.cmp(&b.1));
-
-            for ((ei, ev), (v, i)) in map.iter().zip(intervals.iter()) {
-                assert_eq!(ei, i);
-                assert_eq!(ev, v);
-            }
-        });
-    }
-
-    #[test]
-    fn interval_map_clear_is_ok() {
-        let mut map = IntervalMap::new();
-        map.insert(Interval::new(1, 3), 1);
-        map.insert(Interval::new(2, 4), 2);
-        map.insert(Interval::new(6, 7), 3);
-        assert_eq!(map.len(), 3);
-        map.clear();
-        assert_eq!(map.len(), 0);
-        assert!(map.is_empty());
-        assert_eq!(map.nodes.len(), 1);
-        assert!(map.nodes[0].is_sentinel());
     }
 }
