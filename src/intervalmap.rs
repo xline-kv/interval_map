@@ -1,6 +1,7 @@
 use crate::entry::{Entry, OccupiedEntry, VacantEntry};
 use crate::index::{DefaultIx, IndexType, NodeIndex};
 use crate::interval::{Interval, IntervalRef};
+use crate::iter::{FilterIter, IntoIter, Iter, UnsortedIter};
 use crate::node::{Color, Node};
 
 use std::collections::VecDeque;
@@ -69,7 +70,7 @@ where
         // check for max capacity, except if we use usize
         assert!(
             <Ix as IndexType>::max().index() == !0
-                || <NodeIndex<Ix> as IndexType>::max() != node_idx,
+                || <NodeIndex<_> as IndexType>::max() != node_idx,
             "Reached maximum number of nodes"
         );
         self.nodes.push(node);
@@ -126,6 +127,10 @@ where
         !self.node_ref(node_idx, Node::is_sentinel)
     }
 
+    /// When `interval_map.len() < Self::BFS_MIN_THRESHOLD`, directly traversing the inner vec of `interval_map`
+    /// is faster than BFS.
+    const BFS_MIN_THRESHOLD: usize = 20;
+
     /// Find all intervals in the map that overlaps with the given interval.
     ///
     /// # Note
@@ -147,9 +152,44 @@ where
     #[inline]
     pub fn find_all_overlap(&self, interval: &Interval<T>) -> Vec<(&Interval<T>, &V)> {
         if self.node_ref(self.root, Node::is_sentinel) {
+            return Vec::new();
+        }
+        if self.len() > Self::BFS_MIN_THRESHOLD {
+            self.find_all_overlap_inner(self.root, interval)
+        } else {
+            self.unsorted_iter()
+                .filter(|v| v.0.overlaps(interval))
+                .collect()
+        }
+    }
+
+    /// Find all intervals in the map that overlaps with the given interval.
+    ///
+    /// # Note
+    /// This method's returned data is ordered. Generally, it's much slower than `find_all_overlap`.
+    ///
+    /// # Example
+    /// ```rust
+    /// use interval_map::{Interval, IntervalMap};
+    ///
+    /// let mut map = IntervalMap::new();
+    /// map.insert(Interval::new(1, 3), ());
+    /// map.insert(Interval::new(2, 4), ());
+    /// map.insert(Interval::new(6, 7), ());
+    /// map.insert(Interval::new(7, 11), ());
+    /// assert_eq!(map.find_all_overlap(&Interval::new(2, 7)).len(), 3);
+    /// map.remove(&Interval::new(1, 3));
+    /// assert_eq!(map.find_all_overlap(&Interval::new(2, 7)).len(), 2);
+    /// ```
+    #[inline]
+    pub fn find_all_overlap_ordered<'a>(
+        &'a self,
+        interval: &'a Interval<T>,
+    ) -> Vec<(&Interval<T>, &V)> {
+        if self.node_ref(self.root, Node::is_sentinel) {
             Vec::new()
         } else {
-            self.find_all_overlap_inner(self.root, interval)
+            self.filter_iter(interval).collect()
         }
     }
 
@@ -187,6 +227,70 @@ where
     pub fn get_mut(&mut self, interval: &Interval<T>) -> Option<&mut V> {
         self.search_exact(interval)
             .map(|idx| self.node_mut(idx, Node::value_mut))
+    }
+
+    /// Get an iterator over the entries of the map, sorted by key.
+    #[inline]
+    #[must_use]
+    pub fn iter(&self) -> Iter<'_, T, V, Ix> {
+        Iter::new(self)
+    }
+
+    /// Get an iterator over the entries of the map, unsorted.
+    #[inline]
+    pub fn unsorted_iter(&self) -> UnsortedIter<T, V, Ix> {
+        UnsortedIter::new(self)
+    }
+
+    /// Get an iterator over the entries that overlap the `query`, sorted by key.
+    ///
+    /// # Panics
+    ///
+    /// The method panics when `query` contains a value that cannot be compared.
+    #[inline]
+    pub fn filter_iter<'a, 'b: 'a>(&'a self, query: &'b Interval<T>) -> FilterIter<T, V, Ix> {
+        FilterIter::new(self, query)
+    }
+
+    /// Return true if the interval tree's key cover the entire given interval.
+    ///
+    /// # Example
+    /// ```rust
+    /// use interval_map::{Interval, IntervalMap};
+    ///
+    /// let mut map = IntervalMap::new();
+    /// map.insert(Interval::new(3, 5), 0);
+    /// map.insert(Interval::new(5, 8), 1);
+    /// map.insert(Interval::new(9, 12), 1);
+    /// assert!(map.contains(&Interval::new(4, 6)));
+    /// assert!(!map.contains(&Interval::new(7, 10)));
+    /// ```
+    #[inline]
+    pub fn contains(&self, interval: &Interval<T>) -> bool {
+        let mut max_end: Option<&T> = None;
+        let mut min_begin: Option<&T> = None;
+
+        let mut continuous = true;
+        self.filter_iter(interval).find(|v| {
+            if min_begin.is_none() {
+                min_begin = Some(&v.0.low);
+                max_end = Some(&v.0.high);
+                return false;
+            }
+            if max_end.map(|mv| mv < &v.0.low).unwrap() {
+                continuous = false;
+                return true;
+            }
+            if max_end.map(|mv| mv < &v.0.high).unwrap() {
+                max_end = Some(&v.0.high);
+            }
+            false
+        });
+
+        continuous
+            && min_begin.is_some()
+            && max_end.map(|mv| mv >= &interval.high).unwrap()
+            && min_begin.map(|mv| mv <= &interval.low).unwrap()
     }
 
     /// Get the given key's corresponding entry in the map for in-place manipulation.
@@ -238,6 +342,21 @@ where
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl<T, V, Ix> IntoIterator for IntervalMap<T, V, Ix>
+where
+    T: Ord,
+    Ix: IndexType,
+{
+    type Item = (Interval<T>, V);
+
+    type IntoIter = IntoIter<T, V, Ix>;
+
+    /// Get an into iterator over the entries of the map, sorted by key.
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter::new(self)
     }
 }
 

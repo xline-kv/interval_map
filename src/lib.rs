@@ -25,8 +25,10 @@ mod entry;
 mod index;
 mod interval;
 mod intervalmap;
+mod iter;
 mod node;
 
 pub use entry::{Entry, OccupiedEntry, VacantEntry};
 pub use interval::Interval;
 pub use intervalmap::IntervalMap;
+pub use iter::{FilterIter, IntoIter, Iter, UnsortedIter};
