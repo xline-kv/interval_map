@@ -1,6 +1,6 @@
 use std::cmp;
 
-use interval_map::{Interval, IntervalMap};
+use rb_interval_map::{Interval, IntervalMap};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StringAffine {

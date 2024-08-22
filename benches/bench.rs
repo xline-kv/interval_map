@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Bencher, Criterion};
-use interval_map::{Interval, IntervalMap};
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use rb_interval_map::{Interval, IntervalMap};
 use std::hint::black_box;
 
 struct IntervalGenerator {

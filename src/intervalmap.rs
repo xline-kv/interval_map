@@ -56,7 +56,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// use interval_map::{Interval, IntervalMap};
+    /// use rb_interval_map::{Interval, IntervalMap};
     ///
     /// let mut map = IntervalMap::new();
     /// assert_eq!(map.insert(Interval::new(1, 3), 1), None);
@@ -81,7 +81,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// use interval_map::{Interval, IntervalMap};
+    /// use rb_interval_map::{Interval, IntervalMap};
     ///
     /// let mut map = IntervalMap::new();
     /// map.insert(Interval::new(1, 3), 1);
@@ -110,7 +110,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// use interval_map::{Interval, IntervalMap};
+    /// use rb_interval_map::{Interval, IntervalMap};
     ///
     /// let mut map = IntervalMap::new();
     /// map.insert(Interval::new(1, 3), ());
@@ -138,7 +138,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// use interval_map::{Interval, IntervalMap};
+    /// use rb_interval_map::{Interval, IntervalMap};
     ///
     /// let mut map = IntervalMap::new();
     /// map.insert(Interval::new(1, 3), ());
@@ -170,7 +170,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// use interval_map::{Interval, IntervalMap};
+    /// use rb_interval_map::{Interval, IntervalMap};
     ///
     /// let mut map = IntervalMap::new();
     /// map.insert(Interval::new(1, 3), ());
@@ -197,7 +197,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// use interval_map::{Interval, IntervalMap};
+    /// use rb_interval_map::{Interval, IntervalMap};
     ///
     /// let mut map = IntervalMap::new();
     /// map.insert(Interval::new(1, 3), 1);
@@ -216,7 +216,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// use interval_map::{Interval, IntervalMap};
+    /// use rb_interval_map::{Interval, IntervalMap};
     ///
     /// let mut map = IntervalMap::new();
     /// map.insert(Interval::new(3, 5), 0);
@@ -256,7 +256,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// use interval_map::{Interval, IntervalMap};
+    /// use rb_interval_map::{Interval, IntervalMap};
     ///
     /// let mut map = IntervalMap::new();
     /// map.insert(Interval::new(3, 5), 0);
@@ -297,7 +297,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// use interval_map::{Interval, IntervalMap, Entry};
+    /// use rb_interval_map::{Interval, IntervalMap, Entry};
     ///
     /// let mut map = IntervalMap::new();
     ///
