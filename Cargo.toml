@@ -1,11 +1,14 @@
 [package]
-name = "interval_map"
-version = "0.1.0"
+name = "rb-interval-map"
+version = "0.1.2"
 edition = "2021"
 authors = ["feathercyc feathercyc@163.com"]
-description = "`interval_map` is a map based on interval tree."
+description = "`rb-interval-map` is a map based on interval tree."
+repository = "https://github.com/xline-kv/interval_map"
 license = "Apache-2.0"
-keywords = ["Interval Tree", "Augmented Tree", "Red-Black Tree"]
+keywords = ["IntervalTree", "AugmentedTree", "RedBlackTree"]
+documentation = "https://docs.rs/rb-interval-map"
+homepage = "https://github.com/xline-kv/interval_map"
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = [

@@ -1,22 +1,22 @@
-# interval_map
+# rb-interval-map
 
-`interval_map` is a map based on interval tree. It fully implements the insertion and deletion functionality of a red-black tree, ensuring that each modification operation requires at most $O(logN)$ time complexity.
+`rb-interval-map` is a map based on interval tree. It fully implements the insertion and deletion functionality of a red-black tree, ensuring that each modification operation requires at most $O(logN)$ time complexity.
 
-The implementation of the interval tree in interval_map references "Introduction to Algorithms" (3rd ed., Section 14.3: Interval trees, pp. 348–354).
+The implementation of the interval tree in `rb-interval-map` references "Introduction to Algorithms" (3rd ed., Section 14.3: Interval trees, pp. 348–354).
 
-To safely and efficiently handle insertion and deletion operations in Rust, `interval_map` innovatively **uses arrays to simulate pointers** for managing the parent-child references in the red-black tree. This approach also ensures that interval_map has the `Send` and `Unpin` traits, allowing it to be safely transferred between threads and to maintain a fixed memory location during asynchronous operations.
+To safely and efficiently handle insertion and deletion operations in Rust, `rb-interval-map` innovatively **uses arrays to simulate pointers** for managing the parent-child references in the red-black tree. This approach also ensures that `rb-interval-map` has the `Send` and `Unpin` traits, allowing it to be safely transferred between threads and to maintain a fixed memory location during asynchronous operations.
 
-`interval_map` implements an `IntervalMap` struct:
+`rb-interval-map` implements an `IntervalMap` struct:
 - It accepts `Interval<T>` as the key, where `T` can be any type that implements `Ord` trait. Therefore, intervals such as $[1, 2)$ and $["aaa", "bbb")$ are allowed
 - The value can be of any type
 
-`interval_map` supports `insert`, `delete`, and `iter` fns. Traversal is performed in the order of `Interval<T>` . For instance, with intervals of type `Interval<u32>`:
+`rb-interval-map` supports `insert`, `delete`, and `iter` fns. Traversal is performed in the order of `Interval<T>` . For instance, with intervals of type `Interval<u32>`:
 - $[1,4)<[2,5)$, because $1<2$
 - $[1,4)<[1,5)$, because $4<5$
 
 So the order of intervals in `IntervalMap` is $[1,4)<[1,5)<[2,5)$.
 
-Currently, `interval_map` only supports half-open intervals, i.e., $[...,...)$.
+Currently, `rb-interval-map` only supports half-open intervals, i.e., $[...,...)$.
 
 ## Benchmark
 

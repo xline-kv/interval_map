@@ -42,7 +42,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// use interval_map::{Interval, IntervalMap, Entry};
+    /// use rb_interval_map::{Interval, IntervalMap, Entry};
     ///
     /// let mut map = IntervalMap::new();
     /// assert!(matches!(map.entry(Interval::new(1, 2)), Entry::Vacant(_)));
@@ -71,7 +71,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// use interval_map::{Interval, IntervalMap, Entry};
+    /// use rb_interval_map::{Interval, IntervalMap, Entry};
     ///
     /// let mut map = IntervalMap::new();
     ///

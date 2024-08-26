@@ -1,4 +1,4 @@
-use interval_map::{Interval, IntervalMap};
+use rb_interval_map::{Interval, IntervalMap};
 
 trait Point<T> {
     fn new_point(x: T) -> Interval<T>;

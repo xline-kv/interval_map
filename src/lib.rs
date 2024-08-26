@@ -12,7 +12,7 @@
 //! # Example
 //!
 //! ```rust
-//! use interval_map::{Interval, IntervalMap};
+//! use rb_interval_map::{Interval, IntervalMap};
 //!
 //! let mut map = IntervalMap::new();
 //! let int = Interval::new(1, 2);
